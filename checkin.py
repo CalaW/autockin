@@ -22,7 +22,7 @@ def checkin(cookie):
     referer = "https://glados.cloud/console/checkin"
     origin = "https://glados.cloud"
     useragent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36"
-    payload = {"token": "glados.one"}
+    payload = {"token": "glados.cloud"}
     try:
         checkin = requests.post(
             checkin_url,
