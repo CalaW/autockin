@@ -1,41 +1,37 @@
 name: autockin
 
 on:
-  workflow_dispatch: 
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  workflow_dispatch:
   schedule:
-    - cron:  0 1 * * * 
-      # 
-      # https://tool.lu/crontab/
-      # https://datetime360.com/cn/utc-cst-china-time/
-  #watch:
-  #    types: started   
+    - cron: '42 9 * * *'
+      timezone: 'Asia/Shanghai'
+
+permissions:
+  contents: read
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    #if: github.event.repository.owner.id == github.event.sender.id
-    # https://p3terx.com/archives/github-actions-manual-trigger.html
-    
-    steps:
-    - uses: actions/checkout@v4
+    timeout-minutes: 10
 
-    - name: Install Python
-      run: |
-        sudo apt update && \
-        sudo apt install python3
-      
-    - name: requirements
-      run: |
-        PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install -r requirements.txt
-       # if [ -f requirements.txt ]; then pip install -r requirements.txt; fi 
-    - name: Checkin
-      run: |
-        python3 checkin.py 
-      env: 
-        SERVE: ${{ secrets.SERVE }}
-        SCKEY: ${{ secrets.SCKEY }}
-        COOKIES: ${{ secrets.COOKIES }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check in
+        run: python checkin.py
+        env:
+          SERVE: ${{ secrets.SERVE }}
+          SCKEY: ${{ secrets.SCKEY }}
+          COOKIES: ${{ secrets.COOKIES }}
