@@ -1,4 +1,5 @@
 import os
+import sys
 
 import requests
 
@@ -6,175 +7,164 @@ BASE_URL = "https://glados.cloud"
 CHECKIN_URL = f"{BASE_URL}/api/user/checkin"
 STATUS_URL = f"{BASE_URL}/api/user/status"
 
-REFERER = f"{BASE_URL}/console/checkin"
-
-HEADERS = {
-    "Referer": REFERER,
-    "Origin": BASE_URL,
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/140.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-}
-
 TIMEOUT = 15
 
-# Known normal responses:
-# - a new check-in
-# - already checked in today
-# - newer "observation logged" wording
-NORMAL_CHECKIN_MESSAGES = (
+# Exact User-Agent from the captured Safari request.
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/27.0 Safari/605.1.15"
+)
+
+# Exact headers captured from Safari's check-in POST.
+CHECKIN_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Accept-Language": "zh-CN,zh-Hans;q=0.9",
+    "Cache-Control": "no-cache",
+    "Content-Type": "application/json;charset=utf-8",
+    "Origin": BASE_URL,
+    "Pragma": "no-cache",
+    "Priority": "u=3, i",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "User-Agent": USER_AGENT,
+}
+
+# Exact headers captured from Safari's status GET.
+STATUS_HEADERS = {
+    key: value for key, value in CHECKIN_HEADERS.items() if key not in {"Content-Type", "Origin"}
+}
+
+# Match the browser's 24-byte JSON payload.
+CHECKIN_BODY = b'{"token":"glados.cloud"}'
+
+SUCCESS_MESSAGES = (
     "checkin! got",
-    "checkin repeats! please try tomorrow",
+    "checkin repeats!",
     "today's observation logged",
 )
 
 
-def request_json(method, url, *, cookie, json=None):
-    response = requests.request(
+def request_json(session, method, url, headers, **kwargs):
+    response = session.request(
         method,
         url,
-        headers={
-            **HEADERS,
-            "Cookie": cookie,
-        },
-        json=json,
+        headers=headers,
         timeout=TIMEOUT,
+        **kwargs,
     )
 
     response.raise_for_status()
 
     try:
-        payload = response.json()
+        result = response.json()
     except ValueError as exc:
-        raise RuntimeError(
-            f"{url} returned invalid JSON"
-        ) from exc
+        raise RuntimeError(f"{url} returned invalid JSON") from exc
 
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"{url} returned an unexpected JSON response"
-        )
+    if not isinstance(result, dict):
+        raise RuntimeError(f"{url} returned an unexpected response")
 
-    return payload
+    return result
 
 
-def checkin(cookie):
+def checkin(session, cookie):
     result = request_json(
+        session,
         "POST",
         CHECKIN_URL,
-        cookie=cookie,
-        json={"token": "glados.cloud"},
+        headers={
+            **CHECKIN_HEADERS,
+            "Cookie": cookie,
+        },
+        data=CHECKIN_BODY,
     )
 
-    message = str(result.get("message", "")).strip()
-    normalized_message = message.lower()
+    message = result.get("message", "")
+    normalized = str(message).strip().lower()
 
-    success = (
-        result.get("code") == 0
-        or any(
-            marker in normalized_message
-            for marker in NORMAL_CHECKIN_MESSAGES
-        )
-    )
-
-    if not success:
-        raise RuntimeError(
-            f"Check-in was not successful: "
-            f"code={result.get('code')!r}, message={message!r}"
-        )
+    if not any(marker in normalized for marker in SUCCESS_MESSAGES):
+        raise RuntimeError(f"Check-in failed: code={result.get('code')!r}, message={message!r}")
 
     return message
 
 
-def get_status(cookie):
+def get_status(session, cookie):
     result = request_json(
+        session,
         "GET",
         STATUS_URL,
-        cookie=cookie,
+        headers={
+            **STATUS_HEADERS,
+            "Cookie": cookie,
+        },
     )
 
     data = result.get("data")
+
     if not isinstance(data, dict):
-        raise RuntimeError(
-            "Status response does not contain valid account data "
-            "(the cookie may have expired)"
-        )
+        raise RuntimeError("Invalid account status")
 
-    email = data.get("email")
-    left_days = data.get("leftDays")
+    if not data.get("email"):
+        raise RuntimeError("Missing account email")
 
-    if not email:
-        raise RuntimeError(
-            "Status response does not contain an email "
-            "(the cookie may have expired)"
-        )
-
-    if left_days is None:
-        raise RuntimeError(
-            "Status response does not contain leftDays"
-        )
+    if data.get("leftDays") is None:
+        raise RuntimeError("Missing remaining days")
 
     try:
-        remaining_days = int(float(left_days))
+        remaining_days = int(float(data["leftDays"]))
     except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Invalid leftDays value: {left_days!r}"
-        ) from exc
+        raise RuntimeError("Invalid remaining days") from exc
 
-    return email, remaining_days
+    return remaining_days
 
 
 def run_account(cookie, index):
-    message = checkin(cookie)
-    email, remaining_days = get_status(cookie)
+    with requests.Session() as session:
+        # Remove default requests headers so the explicitly
+        # supplied headers determine the HTTP request.
+        session.headers.clear()
 
-    print(
-        f"Account {index}: {email}\n"
-        f"Check-in: {message}\n"
-        f"Remaining days: {remaining_days}\n"
-    )
+        message = checkin(session, cookie)
+        remaining_days = get_status(session, cookie)
+
+    # Avoid exposing email addresses or cookies in Actions logs.
+    print(f"Account {index}: {message}\nRemaining days: {remaining_days}")
 
 
 def main():
     raw_cookies = os.environ.get("COOKIES", "").strip()
 
     if not raw_cookies:
-        print("::error::COOKIES secret is not configured")
+        print("::error::COOKIES is not configured")
         return 1
 
-    cookies = [
-        cookie.strip()
-        for cookie in raw_cookies.split("&&")
-        if cookie.strip()
-    ]
+    cookies = [cookie.strip() for cookie in raw_cookies.split("&&")]
 
-    if not cookies:
-        print("::error::No valid cookies found in COOKIES")
+    if any(not cookie for cookie in cookies):
+        print("::error::COOKIES contains an empty entry")
         return 1
 
-    failures = []
+    failures = 0
 
     for index, cookie in enumerate(cookies, start=1):
         try:
             run_account(cookie, index)
         except Exception as exc:
-            # Don't print the cookie itself.
-            print(f"::error::Account {index} failed: {exc}")
-            failures.append(index)
+            print(
+                f"::error::Account {index} failed: {exc}",
+                file=sys.stderr,
+            )
+            failures += 1
 
     if failures:
-        print(
-            f"{len(failures)}/{len(cookies)} account(s) failed: "
-            + ", ".join(map(str, failures))
-        )
+        print(f"{failures}/{len(cookies)} accounts failed")
         return 1
 
-    print(f"All {len(cookies)} account(s) checked in successfully.")
+    print(f"All {len(cookies)} accounts checked in successfully")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
